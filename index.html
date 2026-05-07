@@ -568,11 +568,21 @@ function playWithBackup(audio, onDone) {
 }
 
 function playKamiAudio(poem) {
-  const src = `audio/${String(poem.id).padStart(3,'0')}_kami.mp3`;
-  const audio = new Audio(src);
+  const kamiSrc = `audio/${String(poem.id).padStart(3,'0')}_kami.mp3`;
+  const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
+
+  const audio = new Audio(kamiSrc);
   audio.playbackRate = readingRate;
   kamiAudio = audio;
   playState = 'playing-kami';
+
+  // iOS blocks play() from setTimeout (non-gesture context). Pre-unlock the shimo
+  // object now while we're still inside the user-gesture call stack, so the later
+  // play() call in playShimoAudio() succeeds on the same already-trusted object.
+  const shimo = new Audio(shimoSrc);
+  shimo.playbackRate = readingRate;
+  shimoAudio = shimo;
+  shimo.play().then(() => { shimo.pause(); shimo.currentTime = 0; }).catch(() => {});
 
   playWithBackup(audio, () => {
     if (kamiAudio !== audio) return; // stale callback — a newer poem took over
@@ -603,9 +613,11 @@ function startWaiting(poem) {
 }
 
 function playShimoAudio(poem) {
-  const src = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
-  const audio = new Audio(src);
+  const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
+  // Reuse the pre-unlocked object from playKamiAudio; create fresh only as fallback.
+  const audio = shimoAudio || new Audio(shimoSrc);
   audio.playbackRate = readingRate;
+  audio.currentTime = 0;
   shimoAudio = audio;
   playState = 'playing-shimo';
 
