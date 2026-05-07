@@ -530,140 +530,40 @@ let queue = [];
 let currentIdx = 0;
 let totalSelected = 0;
 let readingRate = 0.95;
+let currentAudio = null;
 
-// Audio state machine: 'idle' | 'playing-kami' | 'waiting' | 'playing-shimo'
-let playState = 'idle';
-let audioCtx = null;
-let activeSource = null; // current AudioBufferSourceNode
-let backupTimer = null;
-let waitTimer = null;
-// Incremented by stopAll() so any in-flight async callback knows it's stale.
-let loadGen = 0;
-
-// ===== AUDIO ENGINE =====
-// AudioContext.resume() inside a user gesture permanently unlocks the context.
-// All subsequent play() calls — even from setTimeout or onended — are allowed.
-function unlockAudio() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-}
-
+// ===== AUDIO =====
 function stopAll() {
-  loadGen++;
-  if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
-  if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
-  if (activeSource) {
-    activeSource.onended = null; // prevent onended from firing after stop()
-    try { activeSource.stop(); } catch(e) {}
-    activeSource = null;
-  }
-  playState = 'idle';
-}
-
-// Wraps decodeAudioData in callback style for broad iOS/Safari compatibility.
-function decodeAudio(arrayBuffer) {
-  return new Promise((resolve, reject) => {
-    audioCtx.decodeAudioData(arrayBuffer, resolve, reject);
-  });
-}
-
-// Fetches url, decodes it, plays it via AudioContext, calls onDone when finished.
-// gen must equal loadGen at every async boundary — stale calls abort silently.
-async function fetchAndPlay(url, gen, onDone) {
-  try {
-    const res = await fetch(url);
-    const buf = await res.arrayBuffer();
-    if (loadGen !== gen) return;
-
-    const audioBuffer = await decodeAudio(buf);
-    if (loadGen !== gen) return;
-
-    if (activeSource) {
-      activeSource.onended = null;
-      try { activeSource.stop(); } catch(e) {}
-    }
-    if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.playbackRate.value = readingRate;
-    source.connect(audioCtx.destination);
-    activeSource = source;
-
-    const backupMs = Math.max((audioBuffer.duration / readingRate) * 1000 + 500, 3000);
-    backupTimer = setTimeout(() => {
-      if (loadGen !== gen) return;
-      backupTimer = null;
-      source.onended = null;
-      try { source.stop(); } catch(e) {}
-      if (activeSource === source) activeSource = null;
-      onDone();
-    }, backupMs);
-
-    source.onended = () => {
-      if (loadGen !== gen) return;
-      if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
-      if (activeSource === source) activeSource = null;
-      onDone();
-    };
-
-    source.start(0);
-  } catch(e) {
-    if (loadGen !== gen) return;
-    onDone(); // fetch/decode error — still advance
+  if (currentAudio) {
+    currentAudio.onended = null;
+    currentAudio.onerror = null;
+    currentAudio.pause();
+    currentAudio = null;
   }
 }
 
-function playKamiAudio(poem) {
-  playState = 'playing-kami';
-  const gen = loadGen;
-  fetchAndPlay(`audio/${String(poem.id).padStart(3,'0')}_kami.mp3`, gen, () => {
-    if (loadGen !== gen) return;
-    startWaiting(poem, gen);
-  });
-}
-
-function startWaiting(poem, gen) {
-  playState = 'waiting';
-  document.getElementById('phase-indicator').textContent = '';
-  const countdown = document.getElementById('shimo-countdown');
-  const bar = document.getElementById('shimo-countdown-bar');
-  bar.style.transition = 'none';
-  bar.style.width = '0%';
-  countdown.classList.add('active');
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    bar.style.transition = 'width 1.5s linear';
-    bar.style.width = '100%';
-  }));
-
-  waitTimer = setTimeout(() => {
-    waitTimer = null;
-    if (loadGen !== gen) return;
-    countdown.classList.remove('active');
-    bar.style.width = '0%';
-    playShimoAudio(poem, gen);
-  }, 1500);
-}
-
-function playShimoAudio(poem, gen) {
-  playState = 'playing-shimo';
-  document.getElementById('shimo-box').classList.remove('hidden');
-  document.getElementById('phase-indicator').textContent = '下の句を読み上げ中…';
-
-  fetchAndPlay(`audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`, gen, () => {
-    if (loadGen !== gen) return;
-    playState = 'idle';
-    document.getElementById('phase-indicator').textContent = '「次へ」で次の歌へ';
-    document.getElementById('next-btn').disabled = false;
-  });
+function playPoem(poem) {
+  stopAll();
+  const src = `audio/${String(poem.id).padStart(3,'0')}_combined.mp3`;
+  currentAudio = new Audio(src);
+  currentAudio.playbackRate = readingRate;
+  currentAudio.onended = () => {
+    currentAudio = null;
+    document.getElementById('phase-indicator').textContent = '';
+    nextPoem();
+  };
+  currentAudio.onerror = () => {
+    currentAudio = null;
+    nextPoem();
+  };
+  const p = currentAudio.play();
+  if (p) p.catch(() => {});
 }
 
 function setSpeed(val) {
   readingRate = parseInt(val) / 100;
   document.getElementById('speed-value').textContent = readingRate.toFixed(2);
-  if (activeSource) activeSource.playbackRate.value = readingRate;
+  if (currentAudio) currentAudio.playbackRate = readingRate;
 }
 
 // ===== BUILD LIST =====
@@ -755,7 +655,6 @@ function backToSel() {
 
 // ===== START READING =====
 function startReading() {
-  unlockAudio(); // resume AudioContext inside the user-gesture call stack
   const checked = [...document.querySelectorAll('#poem-list input:checked')];
   const ids = new Set(checked.map(c => parseInt(c.id.replace('chk',''))));
   queue = POEMS.filter(p => ids.has(p.id));
@@ -781,23 +680,20 @@ function loadPoem(idx) {
   document.getElementById('author-display').textContent = poem.author;
   document.getElementById('kami-text').textContent = poem.kami;
   document.getElementById('shimo-text').textContent = poem.shimo;
-  document.getElementById('shimo-box').classList.add('hidden');
-  document.getElementById('phase-indicator').textContent = '上の句を読み上げ中…';
+  document.getElementById('shimo-box').classList.remove('hidden');
+  document.getElementById('phase-indicator').textContent = '読み上げ中…';
   document.getElementById('next-btn').textContent = '次へ';
-  document.getElementById('next-btn').disabled = true;
-  document.getElementById('shimo-countdown').classList.remove('active');
-  document.getElementById('shimo-countdown-bar').style.width = '0%';
+  document.getElementById('next-btn').disabled = false;
 
   const remaining = queue.length - idx;
   document.getElementById('remaining').textContent = `残り ${remaining} / ${totalSelected}`;
   const pct = ((totalSelected - remaining) / totalSelected) * 100;
   document.getElementById('progress-bar').style.width = pct + '%';
 
-  playKamiAudio(poem);
+  playPoem(poem);
 }
 
 function nextPoem() {
-  if (document.getElementById('next-btn').disabled) return;
   stopAll();
   currentIdx++;
   loadPoem(currentIdx);
