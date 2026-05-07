@@ -533,6 +533,7 @@ let shimoPending = false;
 let shimoPendingTimer = null;
 let readingRate = 0.95;
 let currentAudio = null;
+let preloadedShimoAudio = null;
 
 // ===== AUDIO PLAYBACK =====
 function playAudio(src, onEnd) {
@@ -556,6 +557,11 @@ function stopAudio() {
     currentAudio.pause();
     currentAudio.src = '';
     currentAudio = null;
+  }
+  if (preloadedShimoAudio) {
+    preloadedShimoAudio.pause();
+    preloadedShimoAudio.src = '';
+    preloadedShimoAudio = null;
   }
 }
 
@@ -693,6 +699,21 @@ function loadPoem(idx) {
   document.getElementById('shimo-countdown').classList.remove('active');
   document.getElementById('shimo-countdown-bar').style.width = '0%';
 
+  // iOS fix: pre-unlock shimo audio during user gesture context
+  if (preloadedShimoAudio) {
+    preloadedShimoAudio.pause();
+    preloadedShimoAudio.src = '';
+    preloadedShimoAudio = null;
+  }
+  const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
+  const shimoPreload = new Audio(shimoSrc);
+  shimoPreload.playbackRate = readingRate;
+  shimoPreload.play().then(() => {
+    shimoPreload.pause();
+    shimoPreload.currentTime = 0;
+  }).catch(() => {});
+  preloadedShimoAudio = shimoPreload;
+
   // Read kami
   const kamiSrc = `audio/${String(poem.id).padStart(3,'0')}_kami.mp3`;
   playAudio(kamiSrc, () => {
@@ -719,11 +740,29 @@ function loadPoem(idx) {
 function revealShimo(poem) {
   document.getElementById('shimo-box').classList.remove('hidden');
   document.getElementById('phase-indicator').textContent = '下の句を読み上げ中…';
+
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio = null;
+  }
+
   const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
-  playAudio(shimoSrc, () => {
+  const a = preloadedShimoAudio || new Audio(shimoSrc);
+  preloadedShimoAudio = null;
+
+  a.playbackRate = readingRate;
+  let fired = false;
+  const finish = () => {
+    if (fired) return;
+    fired = true;
     document.getElementById('phase-indicator').textContent = '「次へ」で次の歌へ';
     document.getElementById('next-btn').disabled = false;
-  });
+  };
+  a.onended = finish;
+  a.onerror = finish;
+  currentAudio = a;
+  a.play().catch(finish);
 }
 
 function nextPoem() {
