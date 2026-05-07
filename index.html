@@ -534,6 +534,7 @@ let shimoPendingTimer = null;
 let readingRate = 0.95;
 let currentAudio = null;
 let preloadedShimoAudio = null;
+let preloadCancelRef = null;
 
 // ===== AUDIO PLAYBACK =====
 function playAudio(src, onEnd) {
@@ -553,6 +554,10 @@ function playAudio(src, onEnd) {
 }
 
 function stopAudio() {
+  if (preloadCancelRef) {
+    preloadCancelRef.cancelled = true;
+    preloadCancelRef = null;
+  }
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = '';
@@ -699,19 +704,27 @@ function loadPoem(idx) {
   document.getElementById('shimo-countdown').classList.remove('active');
   document.getElementById('shimo-countdown-bar').style.width = '0%';
 
-  // iOS fix: pre-unlock shimo audio during user gesture context
+  // iOS fix: pre-unlock shimo audio during user gesture context (muted to prevent audible overlap)
   if (preloadedShimoAudio) {
     preloadedShimoAudio.pause();
     preloadedShimoAudio.src = '';
     preloadedShimoAudio = null;
   }
+  if (preloadCancelRef) {
+    preloadCancelRef.cancelled = true;
+    preloadCancelRef = null;
+  }
   const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
   const shimoPreload = new Audio(shimoSrc);
   shimoPreload.playbackRate = readingRate;
+  shimoPreload.muted = true;
+  const cancelRef = { cancelled: false };
+  preloadCancelRef = cancelRef;
   shimoPreload.play().then(() => {
     shimoPreload.pause();
     shimoPreload.currentTime = 0;
-  }).catch(() => {});
+    if (!cancelRef.cancelled) shimoPreload.muted = false;
+  }).catch(() => { shimoPreload.muted = false; });
   preloadedShimoAudio = shimoPreload;
 
   // Read kami
@@ -747,10 +760,16 @@ function revealShimo(poem) {
     currentAudio = null;
   }
 
+  if (preloadCancelRef) {
+    preloadCancelRef.cancelled = true;
+    preloadCancelRef = null;
+  }
   const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
   const a = preloadedShimoAudio || new Audio(shimoSrc);
   preloadedShimoAudio = null;
 
+  a.muted = false;
+  a.currentTime = 0;
   a.playbackRate = readingRate;
   let fired = false;
   const finish = () => {
