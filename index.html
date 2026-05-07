@@ -529,51 +529,103 @@ const POEMS = [
 let queue = [];
 let currentIdx = 0;
 let totalSelected = 0;
-let shimoPending = false;
-let shimoPendingTimer = null;
 let readingRate = 0.95;
-let currentAudio = null;
-let preloadedShimoAudio = null;
-let preloadCancelRef = null;
 
-// ===== AUDIO PLAYBACK =====
-function playAudio(src, onEnd) {
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = '';
-    currentAudio = null;
-  }
-  const a = new Audio(src);
-  a.playbackRate = readingRate;
-  let fired = false;
-  const finish = () => { if (fired) return; fired = true; if (onEnd) onEnd(); };
-  a.onended = finish;
-  a.onerror = finish;
-  currentAudio = a;
-  a.play().catch(finish);
+// Audio state machine: 'idle' | 'playing-kami' | 'waiting' | 'playing-shimo'
+let playState = 'idle';
+let kamiAudio = null;
+let shimoAudio = null;
+let waitTimer = null;
+let iosUnlocked = false;
+
+// ===== AUDIO ENGINE =====
+function stopAll() {
+  if (kamiAudio) { kamiAudio.pause(); kamiAudio = null; }
+  if (shimoAudio) { shimoAudio.pause(); shimoAudio = null; }
+  if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+  playState = 'idle';
 }
 
-function stopAudio() {
-  if (preloadCancelRef) {
-    preloadCancelRef.cancelled = true;
-    preloadCancelRef = null;
-  }
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = '';
-    currentAudio = null;
-  }
-  if (preloadedShimoAudio) {
-    preloadedShimoAudio.pause();
-    preloadedShimoAudio.src = '';
-    preloadedShimoAudio = null;
-  }
+// Plays audio and calls onDone when finished.
+// Falls back to a timeout in case onended never fires (iOS quirk).
+function playWithBackup(audio, onDone) {
+  let done = false;
+  let backupTimer = setTimeout(() => { if (!done) { done = true; onDone(); } }, 20000);
+
+  audio.addEventListener('loadedmetadata', () => {
+    if (done) return;
+    const dur = audio.duration;
+    if (dur && isFinite(dur)) {
+      clearTimeout(backupTimer);
+      const ms = Math.max((dur / audio.playbackRate) * 1000 + 500, 3000);
+      backupTimer = setTimeout(() => { if (!done) { done = true; onDone(); } }, ms);
+    }
+  });
+
+  audio.onended = () => { if (!done) { done = true; clearTimeout(backupTimer); onDone(); } };
+  audio.onerror = () => { if (!done) { done = true; clearTimeout(backupTimer); onDone(); } };
+  audio.play().catch(() => { if (!done) { done = true; clearTimeout(backupTimer); onDone(); } });
+}
+
+function playKamiAudio(poem) {
+  const src = `audio/${String(poem.id).padStart(3,'0')}_kami.mp3`;
+  const audio = new Audio(src);
+  audio.playbackRate = readingRate;
+  kamiAudio = audio;
+  playState = 'playing-kami';
+
+  playWithBackup(audio, () => {
+    if (kamiAudio !== audio) return; // stale callback — a newer poem took over
+    kamiAudio = null;
+    startWaiting(poem);
+  });
+}
+
+function startWaiting(poem) {
+  playState = 'waiting';
+  document.getElementById('phase-indicator').textContent = '';
+  const countdown = document.getElementById('shimo-countdown');
+  const bar = document.getElementById('shimo-countdown-bar');
+  bar.style.transition = 'none';
+  bar.style.width = '0%';
+  countdown.classList.add('active');
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    bar.style.transition = 'width 1.5s linear';
+    bar.style.width = '100%';
+  }));
+
+  waitTimer = setTimeout(() => {
+    waitTimer = null;
+    countdown.classList.remove('active');
+    bar.style.width = '0%';
+    playShimoAudio(poem);
+  }, 1500);
+}
+
+function playShimoAudio(poem) {
+  const src = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
+  const audio = new Audio(src);
+  audio.playbackRate = readingRate;
+  shimoAudio = audio;
+  playState = 'playing-shimo';
+
+  document.getElementById('shimo-box').classList.remove('hidden');
+  document.getElementById('phase-indicator').textContent = '下の句を読み上げ中…';
+
+  playWithBackup(audio, () => {
+    if (shimoAudio !== audio) return; // stale callback
+    shimoAudio = null;
+    playState = 'idle';
+    document.getElementById('phase-indicator').textContent = '「次へ」で次の歌へ';
+    document.getElementById('next-btn').disabled = false;
+  });
 }
 
 function setSpeed(val) {
   readingRate = parseInt(val) / 100;
   document.getElementById('speed-value').textContent = readingRate.toFixed(2);
-  if (currentAudio) currentAudio.playbackRate = readingRate;
+  if (kamiAudio) kamiAudio.playbackRate = readingRate;
+  if (shimoAudio) shimoAudio.playbackRate = readingRate;
 }
 
 // ===== BUILD LIST =====
@@ -659,13 +711,18 @@ function showScreen(id) {
 }
 
 function backToSel() {
-  stopAudio();
-  if (shimoPendingTimer) clearTimeout(shimoPendingTimer);
+  stopAll();
   showScreen('screen-sel');
 }
 
 // ===== START READING =====
 function startReading() {
+  // iOS requires audio to be triggered inside a user gesture; do it once here
+  if (!iosUnlocked) {
+    iosUnlocked = true;
+    const dummy = new Audio();
+    dummy.play().catch(() => {});
+  }
   const checked = [...document.querySelectorAll('#poem-list input:checked')];
   const ids = new Set(checked.map(c => parseInt(c.id.replace('chk',''))));
   queue = POEMS.filter(p => ids.has(p.id));
@@ -685,6 +742,8 @@ function loadPoem(idx) {
     showDone();
     return;
   }
+  stopAll();
+
   const poem = queue[idx];
   document.getElementById('author-display').textContent = poem.author;
   document.getElementById('kami-text').textContent = poem.kami;
@@ -693,101 +752,20 @@ function loadPoem(idx) {
   document.getElementById('phase-indicator').textContent = '上の句を読み上げ中…';
   document.getElementById('next-btn').textContent = '次へ';
   document.getElementById('next-btn').disabled = true;
+  document.getElementById('shimo-countdown').classList.remove('active');
+  document.getElementById('shimo-countdown-bar').style.width = '0%';
 
   const remaining = queue.length - idx;
   document.getElementById('remaining').textContent = `残り ${remaining} / ${totalSelected}`;
   const pct = ((totalSelected - remaining) / totalSelected) * 100;
   document.getElementById('progress-bar').style.width = pct + '%';
 
-  shimoPending = false;
-  if (shimoPendingTimer) clearTimeout(shimoPendingTimer);
-  document.getElementById('shimo-countdown').classList.remove('active');
-  document.getElementById('shimo-countdown-bar').style.width = '0%';
-
-  // iOS fix: pre-unlock shimo audio during user gesture context (muted to prevent audible overlap)
-  if (preloadedShimoAudio) {
-    preloadedShimoAudio.pause();
-    preloadedShimoAudio.src = '';
-    preloadedShimoAudio = null;
-  }
-  if (preloadCancelRef) {
-    preloadCancelRef.cancelled = true;
-    preloadCancelRef = null;
-  }
-  const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
-  const shimoPreload = new Audio(shimoSrc);
-  shimoPreload.playbackRate = readingRate;
-  shimoPreload.muted = true;
-  const cancelRef = { cancelled: false };
-  preloadCancelRef = cancelRef;
-  shimoPreload.play().then(() => {
-    shimoPreload.pause();
-    shimoPreload.currentTime = 0;
-    if (!cancelRef.cancelled) shimoPreload.muted = false;
-  }).catch(() => { shimoPreload.muted = false; });
-  preloadedShimoAudio = shimoPreload;
-
-  // Read kami
-  const kamiSrc = `audio/${String(poem.id).padStart(3,'0')}_kami.mp3`;
-  playAudio(kamiSrc, () => {
-    document.getElementById('phase-indicator').textContent = '';
-    const countdown = document.getElementById('shimo-countdown');
-    const bar = document.getElementById('shimo-countdown-bar');
-    bar.style.transition = 'none';
-    bar.style.width = '0%';
-    countdown.classList.add('active');
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      bar.style.transition = 'width 1.5s linear';
-      bar.style.width = '100%';
-    }));
-    shimoPending = true;
-    shimoPendingTimer = setTimeout(() => {
-      shimoPending = false;
-      countdown.classList.remove('active');
-      bar.style.width = '0%';
-      revealShimo(poem);
-    }, 1500);
-  });
-}
-
-function revealShimo(poem) {
-  document.getElementById('shimo-box').classList.remove('hidden');
-  document.getElementById('phase-indicator').textContent = '下の句を読み上げ中…';
-
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = '';
-    currentAudio = null;
-  }
-
-  if (preloadCancelRef) {
-    preloadCancelRef.cancelled = true;
-    preloadCancelRef = null;
-  }
-  const shimoSrc = `audio/${String(poem.id).padStart(3,'0')}_shimo.mp3`;
-  const a = preloadedShimoAudio || new Audio(shimoSrc);
-  preloadedShimoAudio = null;
-
-  a.muted = false;
-  a.currentTime = 0;
-  a.playbackRate = readingRate;
-  let fired = false;
-  const finish = () => {
-    if (fired) return;
-    fired = true;
-    document.getElementById('phase-indicator').textContent = '「次へ」で次の歌へ';
-    document.getElementById('next-btn').disabled = false;
-  };
-  a.onended = finish;
-  a.onerror = finish;
-  currentAudio = a;
-  a.play().catch(finish);
+  playKamiAudio(poem);
 }
 
 function nextPoem() {
   if (document.getElementById('next-btn').disabled) return;
-  stopAudio();
-  if (shimoPendingTimer) clearTimeout(shimoPendingTimer);
+  stopAll();
   currentIdx++;
   loadPoem(currentIdx);
 }
