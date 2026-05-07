@@ -549,12 +549,13 @@ function playPoem(poem) {
   currentAudio.playbackRate = readingRate;
   currentAudio.onended = () => {
     currentAudio = null;
-    document.getElementById('phase-indicator').textContent = '';
-    nextPoem();
+    document.getElementById('phase-indicator').textContent = '「次へ」で次の歌へ';
+    document.getElementById('next-btn').disabled = false;
   };
   currentAudio.onerror = () => {
     currentAudio = null;
-    nextPoem();
+    document.getElementById('phase-indicator').textContent = '「次へ」で次の歌へ';
+    document.getElementById('next-btn').disabled = false;
   };
   const p = currentAudio.play();
   if (p) p.catch(() => {});
@@ -683,7 +684,7 @@ function loadPoem(idx) {
   document.getElementById('shimo-box').classList.remove('hidden');
   document.getElementById('phase-indicator').textContent = '読み上げ中…';
   document.getElementById('next-btn').textContent = '次へ';
-  document.getElementById('next-btn').disabled = false;
+  document.getElementById('next-btn').disabled = true;
 
   const remaining = queue.length - idx;
   document.getElementById('remaining').textContent = `残り ${remaining} / ${totalSelected}`;
